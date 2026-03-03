@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from .base_model import BaseModel
 from . import networks
 
@@ -44,6 +45,8 @@ class Pix2PixModel(BaseModel):
             opt (Option class)-- stores all the experiment flags; needs to be a subclass of BaseOptions
         """
         BaseModel.__init__(self, opt)
+        # upscale factor for super-resolution (1 = no upscaling)
+        self.upscale_factor = 2 ** getattr(opt, 'num_upscale_layers', 0)
         # specify the training losses you want to print out. The training/test scripts will call <BaseModel.get_current_losses>
         self.loss_names = ["G_GAN", "G_L1", "D_real", "D_fake"]
         # specify the images you want to save/display. The training/test scripts will call <BaseModel.get_current_visuals>
@@ -55,7 +58,7 @@ class Pix2PixModel(BaseModel):
             self.model_names = ["G"]
         self.device = opt.device
         # define networks (both generator and discriminator)
-        self.netG = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm, not opt.no_dropout, opt.init_type, opt.init_gain)
+        self.netG = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm, not opt.no_dropout, opt.init_type, opt.init_gain, num_upscale_layers=getattr(opt, 'num_upscale_layers', 0))
 
         if self.isTrain:  # define a discriminator; conditional GANs need to take both input and output images; Therefore, #channels for D is input_nc + output_nc
             self.netD = networks.define_D(opt.input_nc + opt.output_nc, opt.ndf, opt.netD, opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain)
@@ -87,14 +90,22 @@ class Pix2PixModel(BaseModel):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
         self.fake_B = self.netG(self.real_A)  # G(A)
 
+    def _get_real_A_matched(self):
+        """Return real_A upsampled to match fake_B/real_B spatial size for discriminator concat."""
+        if self.upscale_factor > 1:
+            size = self.fake_B.shape[2:]
+            return F.interpolate(self.real_A, size=size, mode='bilinear', align_corners=False)
+        return self.real_A
+
     def backward_D(self):
         """Calculate GAN loss for the discriminator"""
+        real_A_matched = self._get_real_A_matched()
         # Fake; stop backprop to the generator by detaching fake_B
-        fake_AB = torch.cat((self.real_A, self.fake_B), 1)  # we use conditional GANs; we need to feed both input and output to the discriminator
+        fake_AB = torch.cat((real_A_matched, self.fake_B), 1)  # we use conditional GANs; we need to feed both input and output to the discriminator
         pred_fake = self.netD(fake_AB.detach())
         self.loss_D_fake = self.criterionGAN(pred_fake, False)
         # Real
-        real_AB = torch.cat((self.real_A, self.real_B), 1)
+        real_AB = torch.cat((real_A_matched, self.real_B), 1)
         pred_real = self.netD(real_AB)
         self.loss_D_real = self.criterionGAN(pred_real, True)
         # combine loss and calculate gradients
@@ -104,7 +115,8 @@ class Pix2PixModel(BaseModel):
     def backward_G(self):
         """Calculate GAN and L1 loss for the generator"""
         # First, G(A) should fake the discriminator
-        fake_AB = torch.cat((self.real_A, self.fake_B), 1)
+        real_A_matched = self._get_real_A_matched()
+        fake_AB = torch.cat((real_A_matched, self.fake_B), 1)
         pred_fake = self.netD(fake_AB)
         self.loss_G_GAN = self.criterionGAN(pred_fake, True)
         # Second, G(A) = B

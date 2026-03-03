@@ -129,18 +129,19 @@ def init_net(net, init_type="normal", init_gain=0.02):
     return net
 
 
-def define_G(input_nc, output_nc, ngf, netG, norm="batch", use_dropout=False, init_type="normal", init_gain=0.02):
+def define_G(input_nc, output_nc, ngf, netG, norm="batch", use_dropout=False, init_type="normal", init_gain=0.02, num_upscale_layers=0):
     """Create a generator
 
     Parameters:
         input_nc (int) -- the number of channels in input images
         output_nc (int) -- the number of channels in output images
         ngf (int) -- the number of filters in the last conv layer
-        netG (str) -- the architecture's name: resnet_9blocks | resnet_6blocks | unet_128 | unet_256
+        netG (str) -- the architecture's name: resnet_9blocks | resnet_6blocks | unet_128 | unet_256 | unet_256_up
         norm (str) -- the name of normalization layers used in the network: batch | instance | none
         use_dropout (bool) -- if use dropout layers.
         init_type (str)    -- the name of our initialization method.
         init_gain (float)  -- scaling factor for normal, xavier and orthogonal.
+        num_upscale_layers (int) -- number of 2x upsampling layers after UNet (used with unet_256_up)
 
     Returns a generator
     """
@@ -155,6 +156,8 @@ def define_G(input_nc, output_nc, ngf, netG, norm="batch", use_dropout=False, in
         net = UnetGenerator(input_nc, output_nc, 7, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == "unet_256":
         net = UnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
+    elif netG == "unet_256_up":
+        net = UnetUpscaleGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, num_upscale_layers=num_upscale_layers)
     else:
         raise NotImplementedError("Generator model name [%s] is not recognized" % netG)
     return net
@@ -513,6 +516,67 @@ class UnetSkipConnectionBlock(nn.Module):
             return self.model(x)
         else:  # add skip connections
             return torch.cat([x, self.model(x)], 1)
+
+
+class UnetUpscaleGenerator(nn.Module):
+    """UNet-256 generator with additional upscaling layers for super-resolution.
+
+    Wraps a standard UnetGenerator and appends N upscaling blocks (each 2x) to produce
+    higher-resolution output. For example, num_upscale_layers=2 gives 4x upscaling
+    (256x256 input -> 1024x1024 output).
+    """
+
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, num_upscale_layers=2):
+        """Construct a UNet-256 generator with upscaling tail.
+
+        Parameters:
+            input_nc (int)           -- the number of channels in input images
+            output_nc (int)          -- the number of channels in output images
+            ngf (int)                -- the number of filters in the upscale conv layers
+            norm_layer               -- normalization layer
+            use_dropout (bool)       -- if use dropout layers in the base UNet
+            num_upscale_layers (int) -- number of 2x upsampling blocks (2 = 4x upscaling)
+        """
+        super(UnetUpscaleGenerator, self).__init__()
+        assert num_upscale_layers > 0, "Use standard UnetGenerator if num_upscale_layers == 0"
+
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        # Base UNet-256 (outputs output_nc channels at input resolution with Tanh)
+        self.base_unet = UnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
+
+        # Upscaling blocks: each doubles spatial resolution
+        upscale_blocks = []
+        in_ch = output_nc  # base UNet outputs output_nc channels (e.g., 3 for RGB)
+        out_ch = ngf
+        for i in range(num_upscale_layers):
+            is_last = i == num_upscale_layers - 1
+            upscale_blocks += [
+                nn.ConvTranspose2d(in_ch, out_ch, kernel_size=4, stride=2, padding=1, bias=use_bias),
+                norm_layer(out_ch),
+                nn.ReLU(True),
+                nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=use_bias),
+                norm_layer(out_ch),
+                nn.ReLU(True),
+            ]
+            in_ch = out_ch  # subsequent blocks: ngf -> ngf
+
+        # Final output layer
+        upscale_blocks += [
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(out_ch, output_nc, kernel_size=7, padding=0),
+            nn.Tanh(),
+        ]
+
+        self.upscale_tail = nn.Sequential(*upscale_blocks)
+
+    def forward(self, input):
+        """Forward pass: base UNet followed by upscaling tail."""
+        base_out = self.base_unet(input)
+        return self.upscale_tail(base_out)
 
 
 class NLayerDiscriminator(nn.Module):

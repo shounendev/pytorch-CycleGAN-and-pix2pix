@@ -28,6 +28,7 @@ See frequently asked questions at: https://github.com/junyanz/pytorch-CycleGAN-a
 """
 
 import os
+import time
 from pathlib import Path
 from options.test_options import TestOptions
 from data import create_dataset
@@ -66,14 +67,24 @@ if __name__ == "__main__":
     # For [CycleGAN]: It should not affect CycleGAN as CycleGAN uses instancenorm without dropout.
     if opt.eval:
         model.eval()
+    inference_times = []
     for i, data in enumerate(dataset):
         if i >= opt.num_test:  # only apply our model to opt.num_test images.
             break
         model.set_input(data)  # unpack data from data loader
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
         model.test()  # run inference
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        inference_times.append(time.perf_counter() - t0)
         visuals = model.get_current_visuals()  # get image results
         img_path = model.get_image_paths()  # get image paths
         if i % 5 == 0:  # save images to an HTML file
             print(f"processing ({i:04d})-th image... {img_path}")
         save_images(webpage, visuals, img_path, aspect_ratio=opt.aspect_ratio, width=opt.display_winsize)
     webpage.save()  # save the HTML
+    if inference_times:
+        avg_ms = sum(inference_times) / len(inference_times) * 1000
+        print(f"\nInference: {len(inference_times)} images, avg {avg_ms:.1f} ms/image")

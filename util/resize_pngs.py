@@ -6,6 +6,7 @@ then writes resized images to a new directory with the original name.
 
 Usage:
     python scripts/resize_pngs.py /path/to/image_directory
+    python scripts/resize_pngs.py /path/to/image_directory --clean
 """
 
 import argparse
@@ -25,12 +26,49 @@ REQUIRED_SUBDIRS = [
 
 TARGET_SIZE = (256, 256)
 
+SPLITS = ["test", "train", "val"]
+
+
+def clean_pairs(base_dir):
+    """Remove unpaired images so that A/ and B/ have matching filenames in each split."""
+    total_removed = 0
+
+    for split in SPLITS:
+        dir_a = os.path.join(base_dir, split, "A")
+        dir_b = os.path.join(base_dir, split, "B")
+
+        files_a = {f for f in os.listdir(dir_a) if f.lower().endswith(".png")}
+        files_b = {f for f in os.listdir(dir_b) if f.lower().endswith(".png")}
+
+        common = files_a & files_b
+        extras_a = files_a - common
+        extras_b = files_b - common
+
+        for f in extras_a:
+            os.remove(os.path.join(dir_a, f))
+        for f in extras_b:
+            os.remove(os.path.join(dir_b, f))
+
+        removed = len(extras_a) + len(extras_b)
+        total_removed += removed
+        if removed:
+            print(f"  {split}: removed {len(extras_a)} from A, {len(extras_b)} from B, {len(common)} pairs remain")
+
+    if total_removed:
+        print(f"Clean: removed {total_removed} unpaired image(s) total.")
+    else:
+        print("Clean: all A/B pairs already match. Nothing to remove.")
+
 
 def main():
     parser = argparse.ArgumentParser(
         description="Resize all PNGs in a dataset directory tree to 256x256."
     )
     parser.add_argument("directory", help="Path to the dataset directory")
+    parser.add_argument(
+        "--clean", action="store_true",
+        help="After resizing, remove unpaired images so A/ and B/ have matching filenames.",
+    )
     args = parser.parse_args()
 
     src_dir = os.path.abspath(args.directory)
@@ -100,6 +138,9 @@ def main():
     print(f"Done. Resized {resized_count} PNG(s) to {TARGET_SIZE[0]}x{TARGET_SIZE[1]}.")
     if skipped_count:
         print(f"Skipped {skipped_count} non-PNG file(s) (kept only in backup).")
+
+    if args.clean:
+        clean_pairs(src_dir)
 
 
 if __name__ == "__main__":
